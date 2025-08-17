@@ -1,0 +1,15 @@
+# .gitignore file
+
+# Environment variables file
+# This is critical for security!
+.env
+
+# Python virtual environment
+# This folder is generated locally and should not be tracked
+venv/
+/venv
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
