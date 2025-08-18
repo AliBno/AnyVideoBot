@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 import requests
 import yt_dlp
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+    Update, InlineKeyboardButton, InlineKeyboardMarkup
 )
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -63,7 +63,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "3️⃣ انتظر قليلاً وسأرسله لك.\n\n"
             "**المنصات المدعومة:**\n"
             "🎵 TikTok (بدون علامة مائية)\n"
-            "📸 Instagram (صور + Reels)\n"
+            "📸 Instagram (صور + Reels + ألبومات)\n"
             "🎥 YouTube والمزيد..."
         )
         await query.edit_message_text(text, parse_mode="Markdown")
@@ -104,6 +104,31 @@ async def download_tiktok(url: str, message_id: int) -> str | None:
         return None
 
 
+# --- التحميل من Instagram (صور + فيديوهات + Reels + ألبومات) ---
+async def download_instagram(url: str, message_id: int) -> list[str] | None:
+    try:
+        output = f"insta_{message_id}_%(title)s.%(ext)s"
+        ydl_opts = {
+            "outtmpl": output,
+            "quiet": True,
+            "merge_output_format": "mp4",
+        }
+        files = []
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+
+            # ألبوم (playlist)
+            if "entries" in info:
+                for entry in info["entries"]:
+                    files.append(ydl.prepare_filename(entry))
+            else:
+                files.append(ydl.prepare_filename(info))
+        return files
+    except Exception as e:
+        logger.error(f"Instagram download failed: {e}")
+        return None
+
+
 # --- التحميل العام بالـ yt-dlp ---
 async def download_generic(url: str, message_id: int, quality: str = "best") -> str | None:
     try:
@@ -133,27 +158,37 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     processing = await update.message.reply_text("⏳ جاري تحليل الرابط...")
 
-    file_path = None
-    if "tiktok.com" in url:
-        file_path = await download_tiktok(url, msg_id)
-    if not file_path:
-        file_path = await download_generic(url, msg_id)
+    file_paths = None
 
-    if file_path and os.path.exists(file_path):
+    if "tiktok.com" in url:
+        file_paths = [await download_tiktok(url, msg_id)]
+    elif "instagram.com" in url:
+        file_paths = await download_instagram(url, msg_id)
+    else:
+        generic_file = await download_generic(url, msg_id)
+        file_paths = [generic_file] if generic_file else None
+
+    if file_paths:
         await processing.edit_text("✅ تم التحميل! جاري الإرسال...")
 
-        try:
-            if file_path.endswith((".jpg", ".png", ".jpeg", ".webp")):
-                with open(file_path, "rb") as img:
-                    await context.bot.send_photo(chat_id=chat_id, photo=img, caption="📸 صورة جاهزة ✅")
-            else:
-                with open(file_path, "rb") as vid:
-                    await context.bot.send_video(chat_id=chat_id, video=vid, caption="🎬 تم التحميل بنجاح ✅")
-        except Exception as e:
-            logger.error(f"Send failed: {e}")
-            await context.bot.send_message(chat_id, "❌ حدث خطأ أثناء الإرسال (قد يكون الملف كبير).")
-        finally:
-            os.remove(file_path)
+        for file_path in file_paths:
+            if not file_path or not os.path.exists(file_path):
+                continue
+            try:
+                if file_path.endswith((".jpg", ".png", ".jpeg", ".webp")):
+                    with open(file_path, "rb") as img:
+                        await context.bot.send_photo(chat_id=chat_id, photo=img, caption="📸 صورة جاهزة ✅")
+                else:
+                    with open(file_path, "rb") as vid:
+                        await context.bot.send_video(chat_id=chat_id, video=vid, caption="🎬 تم التحميل بنجاح ✅")
+            except Exception as e:
+                logger.error(f"Send failed: {e}")
+                await context.bot.send_message(chat_id, "❌ حدث خطأ أثناء الإرسال (قد يكون الملف كبير).")
+            finally:
+                try:
+                    os.remove(file_path)
+                except:
+                    pass
 
         # تحديث إحصائيات المستخدم
         user_id = update.effective_user.id
