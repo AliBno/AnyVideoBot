@@ -428,10 +428,9 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.exception("handle_link error")
         await processing.edit_text(f"❌ حدث خطأ غير متوقع: {e}")
-
 # ================================ 11) Main ====================================
 
-# <<< NEW: 'main' is now an async function >>>
+# 'main' is now an async function
 async def main():
     if not TELEGRAM_BOT_TOKEN:
         print("❌ لم يتم العثور على TELEGRAM_BOT_TOKEN في .env")
@@ -440,7 +439,7 @@ async def main():
     db_init()
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # <<< NEW: Automatically delete any existing webhook to prevent conflicts >>>
+    # Automatically delete any existing webhook to prevent conflicts
     print("ℹ️ التحقق من Webhook وحذفه إن وجد...")
     if await app.bot.get_webhook_info():
         await app.bot.delete_webhook()
@@ -454,8 +453,10 @@ async def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
 
     print("🚀 البوت يعمل الآن...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    
+    # <<< THE FIX IS HERE: Added 'await' before app.run_polling >>>
+    await app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    # <<< NEW: Run the async main function using asyncio >>>
+    # Run the async main function using asyncio
     asyncio.run(main())
