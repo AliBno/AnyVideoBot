@@ -1,7 +1,7 @@
 # ==============================================================================
 #      🔥 VIP Professional Telegram Media Downloader Bot 🔥
 #                 Developed by: Ali Mahdi
-#   (Final Version by Gemini with Multi-Layered Defense Strategy)
+#   (Final Version by Gemini with Multi-Layered Defense & Crash Fixes)
 # ==============================================================================
 
 import logging
@@ -100,7 +100,6 @@ def album_kb(session_id: str, post_url: str) -> InlineKeyboardMarkup:
 # ============================ 4) TikTok (No WM) ===============================
 
 async def download_tiktok_no_wm(url: str, workfile: str) -> Optional[str]:
-    # This function remains unchanged
     try:
         api = f"https://www.tikwm.com/api/?url={url}"
         r = requests.get(api, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
@@ -146,39 +145,47 @@ def quality_format(q: str) -> str:
 # ========================== 6) Instagram Extraction (Layer 3: Fallback Method) =========
 
 def extract_instagram_items(url: str) -> Tuple[List[Dict], Dict]:
-    # This function remains unchanged, acts as the final fallback
     items: List[Dict] = []
     meta: Dict = {"title": "", "owner": ""}
     opts = base_ydl_opts(download=False)
     with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        if not info:
-            logger.warning(f"yt-dlp failed to extract any info for URL: {url}")
-            return items, meta
-        def push_from_entry(e):
-            if not e: return
-            media_url = e.get("url") or e.get("webpage_url")
-            ext = (e.get("ext") or "").lower()
-            vcodec = e.get("vcodec")
-            typ = "video" if (ext in {"mp4", "webm", "mkv"} or (vcodec and vcodec != "none")) else "photo"
-            if not ext: ext = "mp4" if typ == "video" else "jpg"
-            filename = f"{e.get('id','ig')}.{ext}"
-            if media_url: items.append({"type": typ, "url": media_url, "filename": filename})
-        if info.get("_type") == "playlist" and info.get("entries"):
-            for entry in info["entries"]:
-                if entry: push_from_entry(entry)
-            meta["title"] = info.get("title") or ""
-            meta["owner"] = (info.get("uploader") or info.get("channel") or "").lstrip("@")
-        else:
-            push_from_entry(info)
-            meta["title"] = info.get("title") or ""
-            meta["owner"] = (info.get("uploader") or info.get("channel") or "").lstrip("@")
+        try:
+            info = ydl.extract_info(url, download=False)
+            
+            # This check is critical to prevent crashes when yt-dlp fails
+            if not info:
+                logger.warning(f"yt-dlp returned no info for URL: {url}")
+                return items, meta
+
+            def push_from_entry(e):
+                if not e: return
+                media_url = e.get("url") or e.get("webpage_url")
+                ext = (e.get("ext") or "").lower()
+                vcodec = e.get("vcodec")
+                typ = "video" if (ext in {"mp4", "webm", "mkv"} or (vcodec and vcodec != "none")) else "photo"
+                if not ext: ext = "mp4" if typ == "video" else "jpg"
+                filename = f"{e.get('id','ig')}.{ext}"
+                if media_url: items.append({"type": typ, "url": media_url, "filename": filename})
+            
+            if info.get("_type") == "playlist" and info.get("entries"):
+                for entry in info["entries"]:
+                    if entry: push_from_entry(entry)
+                meta["title"] = info.get("title") or ""
+                meta["owner"] = (info.get("uploader") or info.get("channel") or "").lstrip("@")
+            else:
+                push_from_entry(info)
+                meta["title"] = info.get("title") or ""
+                meta["owner"] = (info.get("uploader") or info.get("channel") or "").lstrip("@")
+        
+        except Exception as e:
+            logger.error(f"An exception occurred inside extract_instagram_items: {e}")
+            return [], {}
+            
     return items, meta
 
 # ============================== 7) Generic Download ===========================
 
 def ytdlp_download(url: str, outtmpl: str, q: str = "best") -> Optional[str]:
-    # This function remains unchanged
     try:
         opts = base_ydl_opts(download=True, outtmpl=outtmpl)
         opts["format"] = quality_format(q)
@@ -193,7 +200,6 @@ def ytdlp_download(url: str, outtmpl: str, q: str = "best") -> Optional[str]:
 # ============================== 8) ZIP Creation ===============================
 
 def download_and_zip(items: List[Dict], zip_path: str) -> str:
-    # This function remains unchanged
     tmpdir = tempfile.mkdtemp(prefix="igzip_")
     try:
         for it in items:
@@ -261,11 +267,10 @@ async def get_insta_media_from_api_v2(url: str) -> Optional[Tuple[List[Dict], Di
         return items, meta
     except Exception as e:
         logger.error(f"Instagram API v2 failed: {e}"); return None
-        
+
 # =============================== 9) Commands/UI ===============================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # This function remains unchanged
     user = update.effective_user
     user_quality.setdefault(user.id, "best")
     user_album_limit.setdefault(user.id, False)
@@ -274,7 +279,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_html(text, reply_markup=main_menu_kb(user.id))
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # This function remains unchanged
     q = update.callback_query; await q.answer(); uid = q.from_user.id
     if q.data == "help":
         text = ("📌 **طريقة الاستخدام:**\n" "1) انسخ رابط المنشور.\n" "2) الصقه هنا.\n" "3) سيُرسل المحتوى مباشرة. للألبومات: تُرسل كـ MediaGroup، ويمكن تنزيلها كـ ZIP.\n\n" "🛠️ من الإعدادات يمكنك تبديل جودة التحميل، وتحديد إرسال أول 10 عناصر فقط من الألبوم.")
@@ -330,22 +334,19 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await processing.edit_text("⏳ [1/3] المحاولة عبر الواجهة الأساسية...")
             api_result_v1 = await get_insta_media_from_api(url)
             if api_result_v1:
-                items, meta = api_result_v1
-                logger.info(f"Success with API v1 for {url}")
+                items, meta = api_result_v1; logger.info(f"Success with API v1 for {url}")
             else:
                 logger.warning(f"API v1 failed. Trying API v2 for {url}.")
                 await processing.edit_text("⏳ [2/3] المحاولة عبر الواجهة الاحتياطية...")
                 api_result_v2 = await get_insta_media_from_api_v2(url)
                 if api_result_v2:
-                    items, meta = api_result_v2
-                    logger.info(f"Success with API v2 for {url}")
+                    items, meta = api_result_v2; logger.info(f"Success with API v2 for {url}")
                 else:
                     logger.warning(f"API v2 also failed. Falling back to yt-dlp for {url}.")
                     await processing.edit_text("⏳ [3/3] المحاولة عبر الطريقة المباشرة...")
                     items, meta = extract_instagram_items(url)
             if not items:
-                await processing.edit_text("❌ فشلت كل المحاولات لاستخراج المحتوى. قد يكون المنشور خاصاً أو تم حذفه.")
-                return
+                await processing.edit_text("❌ فشلت كل المحاولات لاستخراج المحتوى. قد يكون المنشور خاصاً أو تم حذفه."); return
             await processing.edit_text("✅ نجحت إحدى المحاولات! جاري الإرسال...")
             if limit10 and len(items) > 10: items = items[:10]
             sid = make_session_id(chat_id, msg_id)
