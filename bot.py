@@ -1,7 +1,7 @@
 # ==============================================================================
 #      🔥 VIP Professional Telegram Media Downloader Bot 🔥
 #                 Developed by: Ali Mahdi
-#   (Final Version by Gemini with Multi-Layered Defense & Crash Fixes)
+#   (Final Reliability Version by Gemini with Download & Upload Strategy)
 # ==============================================================================
 
 import logging
@@ -13,8 +13,8 @@ import tempfile
 import zipfile
 from typing import List, Dict, Optional, Tuple
 import asyncio
-import httpx  # Required for API methods
-from bs4 import BeautifulSoup  # Required for the backup API method
+import httpx
+from bs4 import BeautifulSoup
 
 from dotenv import load_dotenv
 import requests
@@ -142,7 +142,7 @@ def base_ydl_opts(download: bool = False, outtmpl: Optional[str] = None) -> dict
 def quality_format(q: str) -> str:
     return "b[ext=mp4]/bestvideo*+bestaudio/best" if q == "best" else "worst"
 
-# ========================== 6) Instagram Extraction (Layer 3: Fallback Method) =========
+# ========================== 6) Instagram Extraction (Fallback Method) =========
 
 def extract_instagram_items(url: str) -> Tuple[List[Dict], Dict]:
     items: List[Dict] = []
@@ -151,12 +151,9 @@ def extract_instagram_items(url: str) -> Tuple[List[Dict], Dict]:
     with yt_dlp.YoutubeDL(opts) as ydl:
         try:
             info = ydl.extract_info(url, download=False)
-            
-            # This check is critical to prevent crashes when yt-dlp fails
             if not info:
                 logger.warning(f"yt-dlp returned no info for URL: {url}")
                 return items, meta
-
             def push_from_entry(e):
                 if not e: return
                 media_url = e.get("url") or e.get("webpage_url")
@@ -166,7 +163,6 @@ def extract_instagram_items(url: str) -> Tuple[List[Dict], Dict]:
                 if not ext: ext = "mp4" if typ == "video" else "jpg"
                 filename = f"{e.get('id','ig')}.{ext}"
                 if media_url: items.append({"type": typ, "url": media_url, "filename": filename})
-            
             if info.get("_type") == "playlist" and info.get("entries"):
                 for entry in info["entries"]:
                     if entry: push_from_entry(entry)
@@ -176,11 +172,9 @@ def extract_instagram_items(url: str) -> Tuple[List[Dict], Dict]:
                 push_from_entry(info)
                 meta["title"] = info.get("title") or ""
                 meta["owner"] = (info.get("uploader") or info.get("channel") or "").lstrip("@")
-        
         except Exception as e:
             logger.error(f"An exception occurred inside extract_instagram_items: {e}")
             return [], {}
-            
     return items, meta
 
 # ============================== 7) Generic Download ===========================
@@ -202,6 +196,7 @@ def ytdlp_download(url: str, outtmpl: str, q: str = "best") -> Optional[str]:
 def download_and_zip(items: List[Dict], zip_path: str) -> str:
     tmpdir = tempfile.mkdtemp(prefix="igzip_")
     try:
+        # Note: This still uses direct download, as ZIP creation is less critical
         for it in items:
             local = os.path.join(tmpdir, it["filename"])
             with requests.get(it["url"], stream=True, timeout=60) as r:
@@ -218,55 +213,35 @@ def download_and_zip(items: List[Dict], zip_path: str) -> str:
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
-# ======================== 8.5) Instagram API v1 (Layer 1) =====================
+# ======================== 8.5) Unified Instagram API Downloader ================
 
 async def get_insta_media_from_api(url: str) -> Optional[Tuple[List[Dict], Dict]]:
     try:
-        api_url = "https://sssinstagram.com/api/instagram"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36", "Content-Type": "application/json", "Origin": "https://sssinstagram.com", "Referer": "https://sssinstagram.com/"}
-        payload = {"link": url}
-        async with httpx.AsyncClient() as client:
-            r = await client.post(api_url, json=payload, headers=headers, timeout=30)
-            r.raise_for_status(); data = r.json()
-        if not data.get("success") or not data.get("data"): return None
-        items_data = data["data"]; items: List[Dict] = []; meta: Dict = {"title": "", "owner": "Instagram"}
-        if items_data: meta["title"] = items_data[0].get("meta", {}).get("title", "")
-        for item in items_data:
-            media_type, download_url = item.get("type"), item.get("url")
-            if not download_url: continue
-            ext = "mp4" if media_type == "video" else "jpg"
-            filename = f"{item.get('id', 'api_media')}.{ext}"
-            items.append({"type": media_type, "url": download_url, "filename": filename})
-        return items, meta
-    except Exception as e:
-        logger.error(f"Instagram API v1 failed: {e}"); return None
-
-# ======================== 8.6) Instagram API v2 (Layer 2) =====================
-
-async def get_insta_media_from_api_v2(url: str) -> Optional[Tuple[List[Dict], Dict]]:
-    try:
-        api_url = "https://snapinsta.app/api/ajaxSearch"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36', 'Content-Type': 'application/x-www-form-urlencoded', 'Origin': 'https://snapinsta.app', 'Referer': 'https://snapinsta.app/'}
-        payload = {'q': url}
+        api_url = "https://igdownloader.app/api/ajaxSearch"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36', 'Content-Type': 'application/x-www-form-urlencoded', 'Origin': 'https://igdownloader.app', 'Referer': 'https://igdownloader.app/'}
+        payload = {'q': url, 'type': 'post'}
         async with httpx.AsyncClient() as client:
             r = await client.post(api_url, data=payload, headers=headers, timeout=30)
             r.raise_for_status(); data = r.json()
-        if not data or data.get("status") != "ok" or "data" not in data: return None
+        if not data or not data.get("status") == "ok" or "data" not in data:
+            logger.warning(f"Unified API returned a non-ok status for {url}"); return None
         soup = BeautifulSoup(data["data"], "html.parser")
-        items: List[Dict] = []; meta: Dict = {"title": "تم التحميل", "owner": "Instagram"}
-        download_links = soup.find_all("a", class_="download-btn")
-        if not download_links: return None
-        for i, link in enumerate(download_links):
-            href = link.get("href")
-            if not href: continue
-            is_video = ".mp4" in href
+        items: List[Dict] = []; meta: Dict = {"title": (soup.find("p", class_="title").text if soup.find("p", class_="title") else "تم التحميل"), "owner": "Instagram"}
+        download_widgets = soup.find_all("div", class_="download-items")
+        if not download_widgets: return None
+        for i, widget in enumerate(download_widgets):
+            thumbnail_img = widget.find("img", class_="img-fluid")
+            download_link = widget.find("a", class_="abutton")
+            if not (thumbnail_img and download_link and download_link.get("href")): continue
+            href = download_link["href"]
+            is_video = "video" in thumbnail_img.get("alt", "").lower()
             media_type = "video" if is_video else "photo"
             ext = "mp4" if is_video else "jpg"
-            filename = f"api2_media_{i}.{ext}"
+            filename = f"api_media_{i}.{ext}"
             items.append({"type": media_type, "url": href, "filename": filename})
         return items, meta
     except Exception as e:
-        logger.error(f"Instagram API v2 failed: {e}"); return None
+        logger.error(f"Unified Instagram API downloader failed: {e}"); return None
 
 # =============================== 9) Commands/UI ===============================
 
@@ -279,7 +254,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_html(text, reply_markup=main_menu_kb(user.id))
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer(); uid = q.from_user.id
+    q = update.callback_query
+    # Use a try-except block to prevent crashes on old queries
+    try:
+        await q.answer()
+    except Exception as e:
+        logger.warning(f"Failed to answer callback query, likely old: {e}")
+        return
+        
+    uid = q.from_user.id
     if q.data == "help":
         text = ("📌 **طريقة الاستخدام:**\n" "1) انسخ رابط المنشور.\n" "2) الصقه هنا.\n" "3) سيُرسل المحتوى مباشرة. للألبومات: تُرسل كـ MediaGroup، ويمكن تنزيلها كـ ZIP.\n\n" "🛠️ من الإعدادات يمكنك تبديل جودة التحميل، وتحديد إرسال أول 10 عناصر فقط من الألبوم.")
         await q.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu_kb(uid))
@@ -317,6 +300,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # =============================== 10) Routing & Main Logic =====================
 
+async def download_url_to_bytes(url: str) -> Optional[bytes]:
+    """Downloads content from a URL and returns it as bytes."""
+    try:
+        async with httpx.AsyncClient() as client:
+            # Use a more common user-agent
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+            response = await client.get(url, timeout=60, headers=headers, follow_redirects=True)
+            response.raise_for_status()
+            return response.content
+    except Exception as e:
+        logger.error(f"Failed to download URL to bytes: {url}. Error: {e}")
+        return None
+
 URL_RE = re.compile(r"(https?://\S+)", re.IGNORECASE)
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -331,38 +327,61 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if any(d in url for d in IG_DOMAINS):
             items, meta = None, None
-            await processing.edit_text("⏳ [1/3] المحاولة عبر الواجهة الأساسية...")
-            api_result_v1 = await get_insta_media_from_api(url)
-            if api_result_v1:
-                items, meta = api_result_v1; logger.info(f"Success with API v1 for {url}")
+            await processing.edit_text("⏳ [1/2] المحاولة عبر الواجهة السريعة...")
+            api_result = await get_insta_media_from_api(url)
+            if api_result:
+                items, meta = api_result; logger.info(f"Success with Unified API for {url}")
             else:
-                logger.warning(f"API v1 failed. Trying API v2 for {url}.")
-                await processing.edit_text("⏳ [2/3] المحاولة عبر الواجهة الاحتياطية...")
-                api_result_v2 = await get_insta_media_from_api_v2(url)
-                if api_result_v2:
-                    items, meta = api_result_v2; logger.info(f"Success with API v2 for {url}")
-                else:
-                    logger.warning(f"API v2 also failed. Falling back to yt-dlp for {url}.")
-                    await processing.edit_text("⏳ [3/3] المحاولة عبر الطريقة المباشرة...")
-                    items, meta = extract_instagram_items(url)
+                logger.warning(f"API failed. Falling back to yt-dlp for {url}.")
+                await processing.edit_text("⏳ [2/2] المحاولة عبر الطريقة المباشرة...")
+                items, meta = extract_instagram_items(url)
             if not items:
                 await processing.edit_text("❌ فشلت كل المحاولات لاستخراج المحتوى. قد يكون المنشور خاصاً أو تم حذفه."); return
-            await processing.edit_text("✅ نجحت إحدى المحاولات! جاري الإرسال...")
+            
             if limit10 and len(items) > 10: items = items[:10]
+            await processing.edit_text(f"✅ تم العثور على {len(items)} عنصر. جاري التنزيل والرفع...")
+            
             sid = make_session_id(chat_id, msg_id)
             sessions[sid] = {"items": items, "title": meta.get("title",""), "owner": meta.get("owner",""), "post_url": url}
-            groups: List[List] = []; current: List = []
-            for it in items:
-                media_input = InputMediaPhoto(media=it["url"]) if it["type"] == "photo" else InputMediaVideo(media=it["url"])
-                current.append(media_input)
-                if len(current) == 10: groups.append(current); current = []
-            if current: groups.append(current)
+            
             owner = meta.get("owner") or "instagram"
             caption_text = f"👤 @{owner}\n📝 { (meta.get('title') or '').strip()[:500] }"
-            if groups and hasattr(groups[0][0], "caption"): groups[0][0].caption = caption_text
+            
+            groups: List[List] = []; current: List = []
+            is_first_item = True
+            for i, item in enumerate(items):
+                # Download the media to bytes first
+                await processing.edit_text(f"📥 جاري تنزيل العنصر رقم {i+1}/{len(items)}...")
+                media_bytes = await download_url_to_bytes(item["url"])
+                if not media_bytes:
+                    logger.warning(f"Failed to download item {i+1}, skipping.")
+                    continue
+
+                caption_for_this_item = caption_text if is_first_item else None
+                
+                if item["type"] == "photo":
+                    media_input = InputMediaPhoto(media=media_bytes, caption=caption_for_this_item)
+                else:
+                    media_input = InputMediaVideo(media=media_bytes, caption=caption_for_this_item)
+                
+                current.append(media_input)
+                is_first_item = False
+                
+                if len(current) == 10:
+                    groups.append(current); current = []
+            if current: groups.append(current)
+
+            if not groups:
+                 await processing.edit_text("❌ فشل تنزيل كل العناصر من الروابط المستخرجة."); return
+
+            await processing.edit_text(f"📤 جاري رفع {len(items)} عنصر إلى تيليجرام...")
             for g in groups:
                 await context.bot.send_media_group(chat_id=chat_id, media=g)
                 sent_count += len(g)
+            
+            # Delete the processing message after sending is complete
+            await processing.delete()
+            
             await context.bot.send_message(chat_id=chat_id, text=f"تم إرسال الألبوم ({sent_count} عنصر).", reply_markup=album_kb(sid, url))
         
         elif "tiktok.com" in url:
@@ -377,7 +396,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(path, "rb") as f:
                 await context.bot.send_video(chat_id=chat_id, video=f, caption="🎬 TikTok بدون علامة مائية")
             sent_count += 1; os.remove(path)
-            
+            await processing.delete()
+
         else: # Generic (YouTube, etc.)
             outtmpl = os.path.join(tempfile.gettempdir(), f"media_{chat_id}_{msg_id}.%(ext)s")
             path = ytdlp_download(url, outtmpl, q=qpref)
@@ -389,11 +409,15 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 with open(path, "rb") as f: await context.bot.send_video(chat_id=chat_id, video=f, caption=f"🎬 تم التحميل ({'HD' if qpref=='best' else 'SD'})")
             sent_count += 1; os.remove(path)
-            
+            await processing.delete()
+
         if sent_count > 0: db_init(); db_inc_count(uid, sent_count)
     except Exception as e:
         logger.exception("handle_link error")
-        await processing.edit_text(f"❌ حدث خطأ غير متوقع: {e}")
+        try:
+            await processing.edit_text(f"❌ حدث خطأ غير متوقع: {e}")
+        except:
+            pass # Message might have been deleted
 
 # ================================ 11) Main ====================================
 
