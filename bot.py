@@ -1,6 +1,7 @@
 # ==============================================================================
-#            🔥 VIP Professional Telegram Media Downloader Bot 🔥
-#                      Developed by: Ali Mahdi
+#      🔥 VIP Professional Telegram Media Downloader Bot 🔥
+#                 Developed by: Ali Mahdi
+#          (Updated by Gemini to include auto-deleteWebhook)
 # ==============================================================================
 
 import logging
@@ -11,6 +12,7 @@ import sqlite3
 import tempfile
 import zipfile
 from typing import List, Dict, Optional, Tuple
+import asyncio # <<< NEW: Required for async main function
 
 from dotenv import load_dotenv
 import requests
@@ -70,10 +72,10 @@ def db_inc_count(user_id: int, delta: int):
 
 # ============================ 2) In-Memory Prefs ==============================
 
-user_quality: Dict[int, str] = {}     # {user_id: "best"|"worst"}
-user_album_limit: Dict[int, bool] = {}# {user_id: True(send first 10) | False(send all)}
+user_quality: Dict[int, str] = {}    # {user_id: "best"|"worst"}
+user_album_limit: Dict[int, bool] = {} # {user_id: True(send first 10) | False(send all)}
 
-sessions: Dict[str, Dict] = {}        # session_id -> {"items":[...], "title","owner","post_url"}
+sessions: Dict[str, Dict] = {}       # session_id -> {"items":[...], "title","owner","post_url"}
 
 def make_session_id(chat_id: int, message_id: int) -> str:
     return f"{chat_id}:{message_id}"
@@ -277,6 +279,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = user_album_limit.get(uid, False)
         user_album_limit[uid] = not cur
         await q.edit_message_text("✅ تم تغيير نطاق الألبوم.", reply_markup=main_menu_kb(uid))
+    
+    # <<< NEW: Handle 'developer' button >>>
+    elif q.data == "developer":
+        dev_text = (
+            "👨‍💻 **عن المطور**\n\n"
+            "تم تطوير هذا البوت بواسطة **علي مهدي**.\n"
+            "للتواصل أو للاستفسار، يمكنك زيارة [حساب المطور](https://t.me/ali_mahdi_1)."
+        )
+        await q.edit_message_text(dev_text, parse_mode="Markdown", reply_markup=main_menu_kb(uid))
 
     elif q.data.startswith("zip|"):
         _, sid = q.data.split("|", 1)
@@ -420,13 +431,23 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================================ 11) Main ====================================
 
-def main():
+# <<< NEW: 'main' is now an async function >>>
+async def main():
     if not TELEGRAM_BOT_TOKEN:
         print("❌ لم يتم العثور على TELEGRAM_BOT_TOKEN في .env")
         return
 
     db_init()
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    # <<< NEW: Automatically delete any existing webhook to prevent conflicts >>>
+    print("ℹ️ التحقق من Webhook وحذفه إن وجد...")
+    if await app.bot.get_webhook_info():
+        await app.bot.delete_webhook()
+        print("✅ تم حذف الـ Webhook بنجاح.")
+    else:
+        print("👍 لا يوجد Webhook، سيتم البدء بـ Polling مباشرة.")
+
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
@@ -436,4 +457,5 @@ def main():
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    main()
+    # <<< NEW: Run the async main function using asyncio >>>
+    asyncio.run(main())
