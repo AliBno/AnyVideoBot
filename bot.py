@@ -3,11 +3,11 @@
 #                      Developed by: Ali Mahdi
 # ==============================================================================
 
-import asyncio
 import logging
 import os
 import re
 import shutil
+import sqlite3
 import tempfile
 import zipfile
 from typing import List, Dict, Optional, Tuple
@@ -18,7 +18,7 @@ import yt_dlp
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    InputMediaPhoto, InputMediaVideo, FSInputFile
+    InputMediaPhoto, InputMediaVideo
 )
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -36,27 +36,64 @@ logging.basicConfig(
 )
 logger = logging.getLogger("VIPDownloader")
 
-# ============================ 1) In-Memory Store ==============================
+# ============================ 1) Persistence (SQLite) =========================
 
-user_stats: Dict[int, int] = {}             # {user_id: count}
-user_quality: Dict[int, str] = {}           # {user_id: "best" | "worst"}
-sessions: Dict[str, Dict] = {}              # session_id -> {"items":[{"type","url","filename"}], "title","owner"}
+DB_PATH = os.path.join(os.getcwd(), "bot_data.sqlite3")
 
-# helper to build session key per message
+def db_init():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_stats (
+            user_id INTEGER PRIMARY KEY,
+            count   INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def db_get_count(user_id: int) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT count FROM user_stats WHERE user_id=?", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+def db_inc_count(user_id: int, delta: int):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("INSERT INTO user_stats(user_id, count) VALUES(?, ?) ON CONFLICT(user_id) DO UPDATE SET count = count + ?",
+                (user_id, delta, delta))
+    conn.commit()
+    conn.close()
+
+# ============================ 2) In-Memory Prefs ==============================
+
+user_quality: Dict[int, str] = {}     # {user_id: "best"|"worst"}
+user_album_limit: Dict[int, bool] = {}# {user_id: True(send first 10) | False(send all)}
+
+sessions: Dict[str, Dict] = {}        # session_id -> {"items":[...], "title","owner","post_url"}
+
 def make_session_id(chat_id: int, message_id: int) -> str:
     return f"{chat_id}:{message_id}"
 
-# =============================== 2) UI Helpers ================================
+# =============================== 3) UI Helpers ================================
 
 def main_menu_kb(user_id: int) -> InlineKeyboardMarkup:
     q = user_quality.get(user_id, "best")
+    limit10 = user_album_limit.get(user_id, False)
     kb = [
         [InlineKeyboardButton("ℹ️ طريقة الاستخدام", callback_data="help")],
         [InlineKeyboardButton("📊 إحصائياتي", callback_data="stats")],
         [
             InlineKeyboardButton(
-                f"🛠️ جودة التحميل: {'عالية' if q=='best' else 'خفيفة'}",
+                f"🛠️ الجودة: {'عالية' if q=='best' else 'خفيفة'}",
                 callback_data="toggle_quality"
+            ),
+            InlineKeyboardButton(
+                f"🖼️ الألبوم: {'أول 10' if limit10 else 'الكل'}",
+                callback_data="toggle_album_limit"
             )
         ],
         [InlineKeyboardButton("👨‍💻 عن المطور", callback_data="developer")],
@@ -69,7 +106,7 @@ def album_kb(session_id: str, post_url: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👤 فتح المنشور الأصلي", url=post_url)]
     ])
 
-# ============================ 3) TikTok (No WM) ===============================
+# ============================ 4) TikTok (No WM) ===============================
 
 async def download_tiktok_no_wm(url: str, workfile: str) -> Optional[str]:
     try:
@@ -91,7 +128,7 @@ async def download_tiktok_no_wm(url: str, workfile: str) -> Optional[str]:
         logger.warning(f"TikTok no-wm failed: {e}")
         return None
 
-# =========================== 4) yt-dlp Utilities ==============================
+# =========================== 5) yt-dlp Utilities ==============================
 
 IG_DOMAINS = ("instagram.com", "www.instagram.com")
 
@@ -104,6 +141,10 @@ def base_ydl_opts(download: bool = False, outtmpl: Optional[str] = None) -> dict
         "concurrent_fragment_downloads": 4,
         "nocheckcertificate": True,
         "cachedir": False,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0",
+            "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+        }
     }
     if outtmpl:
         opts["outtmpl"] = outtmpl
@@ -112,20 +153,15 @@ def base_ydl_opts(download: bool = False, outtmpl: Optional[str] = None) -> dict
     return opts
 
 def quality_format(q: str) -> str:
-    # prefer mp4 for videos when available
-    if q == "best":
-        return "b[ext=mp4]/bestvideo*+bestaudio/best"
-    else:
-        return "worst"
+    return "b[ext=mp4]/bestvideo*+bestaudio/best" if q == "best" else "worst"
 
-# ========================== 5) Instagram Extraction ===========================
+# ========================== 6) Instagram Extraction ===========================
 
 def extract_instagram_items(url: str) -> Tuple[List[Dict], Dict]:
     """
     Returns (items, meta)
     items: list of {"type": "photo"|"video", "url": str, "filename": str}
     meta: {"title":str, "owner":str}
-    Uses yt-dlp with download=False to get direct media URLs (fast).
     """
     items: List[Dict] = []
     meta: Dict = {"title": "", "owner": ""}
@@ -135,21 +171,21 @@ def extract_instagram_items(url: str) -> Tuple[List[Dict], Dict]:
         info = ydl.extract_info(url, download=False)
 
         def push_from_entry(e):
-            # Determine media url and type
             media_url = e.get("url") or e.get("webpage_url")
             ext = (e.get("ext") or "").lower()
             vcodec = e.get("vcodec")
             typ = "video" if (ext in {"mp4", "webm", "mkv"} or (vcodec and vcodec != "none")) else "photo"
-            filename = f"{e.get('id','ig')}.{ext or ('mp4' if typ=='video' else 'jpg')}"
+            # fallback extension
+            if not ext:
+                ext = "mp4" if typ == "video" else "jpg"
+            filename = f"{e.get('id','ig')}.{ext}"
             if media_url:
                 items.append({"type": typ, "url": media_url, "filename": filename})
 
-        # playlist (album) vs single
         if info.get("_type") == "playlist" and info.get("entries"):
             for entry in info["entries"]:
-                if not entry:
-                    continue
-                push_from_entry(entry)
+                if entry:
+                    push_from_entry(entry)
             meta["title"] = info.get("title") or ""
             meta["owner"] = (info.get("uploader") or info.get("channel") or "").lstrip("@")
         else:
@@ -159,13 +195,12 @@ def extract_instagram_items(url: str) -> Tuple[List[Dict], Dict]:
 
     return items, meta
 
-# ============================== 6) Generic Download ===========================
+# ============================== 7) Generic Download ===========================
 
 def ytdlp_download(url: str, outtmpl: str, q: str = "best") -> Optional[str]:
     try:
         opts = base_ydl_opts(download=True, outtmpl=outtmpl)
         opts["format"] = quality_format(q)
-        # merge mp4 when needed
         opts["merge_output_format"] = "mp4"
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -174,42 +209,36 @@ def ytdlp_download(url: str, outtmpl: str, q: str = "best") -> Optional[str]:
         logger.error(f"yt-dlp download failed: {e}")
         return None
 
-# ============================== 7) ZIP Creation ===============================
+# ============================== 8) ZIP Creation ===============================
 
 def download_and_zip(items: List[Dict], zip_path: str) -> str:
-    """
-    Downloads given media items and packs them into zip_path.
-    Returns the zip path.
-    """
     tmpdir = tempfile.mkdtemp(prefix="igzip_")
     try:
         for it in items:
-            fname = it["filename"]
-            url = it["url"]
-            local = os.path.join(tmpdir, fname)
-            with requests.get(url, stream=True, timeout=60) as r:
+            local = os.path.join(tmpdir, it["filename"])
+            with requests.get(it["url"], stream=True, timeout=60) as r:
                 r.raise_for_status()
                 with open(local, "wb") as f:
                     for chunk in r.iter_content(1024 * 1024):
                         if chunk:
                             f.write(chunk)
-        # zip all
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
             for root, _, files in os.walk(tmpdir):
                 for fn in files:
                     full = os.path.join(root, fn)
-                    arc = os.path.relpath(full, tmpdir)
-                    z.write(full, arc)
+                    z.write(full, os.path.relpath(full, tmpdir))
         return zip_path
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
-# =============================== 8) Commands/UI ===============================
+# =============================== 9) Commands/UI ===============================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_quality.setdefault(user.id, "best")
-    welcome = (
+    user_album_limit.setdefault(user.id, False)
+    db_init()
+    text = (
         f"👋 أهلاً {user.mention_html()}!\n\n"
         "أرسل أي رابط من:\n"
         "• 🎵 TikTok (بدون علامة مائية)\n"
@@ -217,7 +246,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🎥 YouTube وغيرها مع اختيار الجودة\n\n"
         "✨ سريع، نظيف، وواجهة أنيقة."
     )
-    await update.message.reply_html(welcome, reply_markup=main_menu_kb(user.id))
+    await update.message.reply_html(text, reply_markup=main_menu_kb(user.id))
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -229,22 +258,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📌 **طريقة الاستخدام:**\n"
             "1) انسخ رابط المنشور.\n"
             "2) الصقه هنا.\n"
-            "3) سيصل المحتوى فورًا. للألبومات: تُرسل كـ MediaGroup ويمكن تنزيلها كـ ZIP.\n\n"
-            "🛠️ يمكنك تبديل جودة التحميل من الزر في القائمة."
+            "3) سيُرسل المحتوى مباشرة. للألبومات: تُرسل كـ MediaGroup، ويمكن تنزيلها كـ ZIP.\n\n"
+            "🛠️ من الإعدادات يمكنك تبديل جودة التحميل، وتحديد إرسال أول 10 عناصر فقط من الألبوم."
         )
         await q.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu_kb(uid))
 
     elif q.data == "stats":
-        count = user_stats.get(uid, 0)
-        await q.edit_message_text(f"📊 حمّلت: **{count}** ملف/وسيط.", parse_mode="Markdown", reply_markup=main_menu_kb(uid))
+        db_init()
+        count = db_get_count(uid)
+        await q.edit_message_text(f"📊 حمّلت: **{count}** وسيط/ملف.", parse_mode="Markdown", reply_markup=main_menu_kb(uid))
 
     elif q.data == "toggle_quality":
         cur = user_quality.get(uid, "best")
         user_quality[uid] = "worst" if cur == "best" else "best"
         await q.edit_message_text("✅ تم تبديل جودة التحميل.", reply_markup=main_menu_kb(uid))
 
+    elif q.data == "toggle_album_limit":
+        cur = user_album_limit.get(uid, False)
+        user_album_limit[uid] = not cur
+        await q.edit_message_text("✅ تم تغيير نطاق الألبوم.", reply_markup=main_menu_kb(uid))
+
     elif q.data.startswith("zip|"):
-        # zip callback: zip|<session_id>
         _, sid = q.data.split("|", 1)
         sess = sessions.get(sid)
         if not sess:
@@ -254,20 +288,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             zip_path = os.path.join(tempfile.gettempdir(), f"album_{sid.replace(':','_')}.zip")
             download_and_zip(sess["items"], zip_path)
-            await q.message.reply_document(
-                document=FSInputFile(zip_path),
-                caption=f"📦 ألبوم @{'{0}'.format(sess.get('owner',''))} — {sess.get('title','')[:60]}"
-            )
-            try:
-                os.remove(zip_path)
-            except:
-                pass
+            with open(zip_path, "rb") as f:
+                await q.message.reply_document(
+                    document=f,
+                    caption=f"📦 ألبوم @{sess.get('owner','')} — {sess.get('title','')[:100]}"
+                )
+            try: os.remove(zip_path)
+            except: pass
             await q.edit_message_text("✅ تم إرسال ملف ZIP.", reply_markup=main_menu_kb(uid))
         except Exception as e:
             logger.error(f"ZIP error: {e}")
             await q.edit_message_text("❌ فشل إنشاء ZIP. حاول لاحقًا.", reply_markup=main_menu_kb(uid))
 
-# =============================== 9) Routing ===================================
+# =============================== 10) Routing ==================================
 
 URL_RE = re.compile(r"(https?://\S+)", re.IGNORECASE)
 
@@ -284,26 +317,28 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg_id = update.message.message_id
     uid = update.effective_user.id
     qpref = user_quality.get(uid, "best")
+    limit10 = user_album_limit.get(uid, False)
 
     processing = await update.message.reply_text("⏳ جاري تحليل الرابط...")
 
-    try:
-        sent_count = 0
+    sent_count = 0
 
-        # Instagram (special handling: send album as MediaGroup)
+    try:
+        # Instagram (special handling)
         if any(d in url for d in IG_DOMAINS):
             items, meta = extract_instagram_items(url)
-
             if not items:
-                await processing.edit_text("❌ لم أستطع استخراج محتوى إنستغرام. تأكد من أن الرابط عام.")
+                await processing.edit_text("❌ لم أستطع استخراج محتوى إنستغرام. تأكد أن الرابط عام.")
                 return
 
-            # Save session for ZIP
-            sid = make_session_id(chat_id, msg_id)
-            sessions[sid] = {"items": items, "title": meta.get("title",""), "owner": meta.get("owner","")}
+            # تطبيق حد أول 10 إن طُلب
+            if limit10 and len(items) > 10:
+                items = items[:10]
 
-            # Prepare media group chunks (Telegram allows up to 10 items per group)
-            # We'll preserve order:
+            sid = make_session_id(chat_id, msg_id)
+            sessions[sid] = {"items": items, "title": meta.get("title",""), "owner": meta.get("owner",""), "post_url": url}
+
+            # بناء MediaGroup (<=10 عناصر لكل رسالة)
             groups: List[List] = []
             current: List = []
             for it in items:
@@ -317,39 +352,40 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if current:
                 groups.append(current)
 
-            # Send groups
-            # First group with caption
             owner = meta.get("owner") or "instagram"
-            caption = f"📸 ألبوم من @{owner}\n" if len(items) > 1 else f"من @{owner}"
+            caption_text = f"👤 @{owner}\n📝 { (meta.get('title') or '').strip()[:500] }"
             if groups:
-                groups[0][0].caption = caption
+                # وضع الكابشن على أول عنصر من أول مجموعة فقط
+                if hasattr(groups[0][0], "caption"):
+                    groups[0][0].caption = caption_text
 
-            # edit processing and send
             await processing.edit_text("✅ تم التحميل! جاري الإرسال...")
             for g in groups:
                 await context.bot.send_media_group(chat_id=chat_id, media=g)
                 sent_count += len(g)
 
-            # After sending, offer ZIP + link
+            # رسالة متابعة مع أزرار (ZIP + فتح المنشور)
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"تم إرسال الألبوم ({len(items)} عنصر).",
+                text=f"تم إرسال الألبوم ({sent_count} عنصر).",
                 reply_markup=album_kb(sid, url)
             )
 
-        # TikTok (no watermark)
+        # TikTok
         elif "tiktok.com" in url:
             workfile = os.path.join(tempfile.gettempdir(), f"tiktok_{chat_id}_{msg_id}.mp4")
             path = await download_tiktok_no_wm(url, workfile)
             if not path or not os.path.exists(path):
-                # fallback to yt-dlp
+                # fallback إلى yt-dlp
                 outtmpl = os.path.join(tempfile.gettempdir(), f"tiktok_{chat_id}_{msg_id}.%(ext)s")
-                path = ytdlp_download(url, outtmpl, q=pref)
+                path = ytdlp_download(url, outtmpl, q=qpref)
             if not path or not os.path.exists(path):
                 await processing.edit_text("❌ فشل التحميل من TikTok.")
                 return
+
             await processing.edit_text("✅ تم التحميل! جاري الإرسال...")
-            await context.bot.send_video(chat_id=chat_id, video=FSInputFile(path), caption="🎬 TikTok بدون علامة مائية")
+            with open(path, "rb") as f:
+                await context.bot.send_video(chat_id=chat_id, video=f, caption="🎬 TikTok بدون علامة مائية")
             sent_count += 1
             try: os.remove(path)
             except: pass
@@ -361,30 +397,35 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not path or not os.path.exists(path):
                 await processing.edit_text("❌ لم أتمكن من التحميل. تأكد من الرابط.")
                 return
+
             await processing.edit_text("✅ تم التحميل! جاري الإرسال...")
             if path.lower().endswith((".jpg",".jpeg",".png",".webp")):
-                await context.bot.send_photo(chat_id=chat_id, photo=FSInputFile(path), caption="📸")
+                with open(path, "rb") as f:
+                    await context.bot.send_photo(chat_id=chat_id, photo=f, caption="📸")
             else:
-                await context.bot.send_video(chat_id=chat_id, video=FSInputFile(path), caption=f"🎬 تم التحميل ({'HD' if qpref=='best' else 'SD'})")
+                with open(path, "rb") as f:
+                    await context.bot.send_video(chat_id=chat_id, video=f, caption=f"🎬 تم التحميل ({'HD' if qpref=='best' else 'SD'})")
             sent_count += 1
             try: os.remove(path)
             except: pass
 
-        # update stats
+        # إحصائيات المستخدم (SQLite)
         if sent_count > 0:
-            user_stats[uid] = user_stats.get(uid, 0) + sent_count
+            db_init()
+            db_inc_count(uid, sent_count)
 
     except Exception as e:
         logger.exception("handle_link error")
         await processing.edit_text(f"❌ حدث خطأ غير متوقع: {e}")
 
-# ================================ 10) Main ====================================
+# ================================ 11) Main ====================================
 
 def main():
     if not TELEGRAM_BOT_TOKEN:
         print("❌ لم يتم العثور على TELEGRAM_BOT_TOKEN في .env")
         return
 
+    db_init()
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
